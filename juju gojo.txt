@@ -31,7 +31,7 @@ local Window = WindUI:CreateWindow({
    Author = "khanhly", -- window subtitle. optional
    Folder = "khanhlydepzai", -- folder to save keys and images  
     Size = UDim2.fromOffset(580, 360), -- window size
-   Transparent = true, -- window transparency
+  Transparent = false,
    Theme = "Sky", -- library theme
     Resizable = true, -- the ability to rezize window
    SideBarWidth = 200, -- sidebar (tabs) width
@@ -3214,6 +3214,9 @@ local lockConn       = nil
 local lastListSignature = ""
 local lastSelectedValue = nil
 
+local refreshQueued = false
+local suppressCb    = false
+
 local function getMyChar()
     return Characters:FindFirstChild(LocalPlayer.Name)
 end
@@ -3259,40 +3262,64 @@ local function unlockFloat()
     lockedHRP = nil
 end
 
-local function refreshList()
-    local newList = {}
+local function buildList()
+    local isPlayer = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        isPlayer[p.Name] = true
+    end
+
+    local names = {}
     for _, c in ipairs(Characters:GetChildren()) do
-        if c:IsA("Model") then
-            table.insert(newList, c.Name)
+        if c:IsA("Model")
+            and c.Name ~= LocalPlayer.Name
+            and isPlayer[c.Name]
+        then
+            names[#names + 1] = c.Name
         end
     end
+    table.sort(names)
+    return names
+end
 
-    local signature = table.concat(newList, "\1")
-    if signature == lastListSignature then
-        return
-    end
-    lastListSignature = signature
-
+local function doRefresh()
+    local newList = buildList()
+    local sig = table.concat(newList, "\1")
+    if sig == lastListSignature then return end
+    lastListSignature = sig
     playerList = newList
+
     if Dropdown then
+        suppressCb = true
         pcall(function() Dropdown:Refresh(playerList) end)
+        task.defer(function() suppressCb = false end)
     end
 end
 
-refreshList()
-
-Characters.ChildRemoved:Connect(function(child)
-    if child.Name == selectedTarget then
-        selectedTarget = nil
-        lastSelectedValue = nil
+local function refreshList(immediate)
+    if immediate then
+        doRefresh()
+        return
     end
+    if refreshQueued then return end
+    refreshQueued = true
+    task.delay(0.5, function()
+        refreshQueued = false
+        doRefresh()
+    end)
+end
+
+refreshList(true)
+
+Characters.ChildAdded:Connect(function()
     refreshList()
 end)
 
-Characters.ChildAdded:Connect(function(child)
-    if child:IsA("Model") then
-        refreshList()
+Characters.ChildRemoved:Connect(function(child)
+    if child.Name == selectedTarget then
+        selectedTarget  = nil
+        lastSelectedValue = nil
     end
+    refreshList()
 end)
 
 local function runRoutine()
@@ -3303,9 +3330,9 @@ local function runRoutine()
 
     if not (myHRP and tHRP) then return end
 
-    local dir     = (tHRP.Position - myHRP.Position)
-    if dir.Magnitude > 0 then dir = dir.Unit else dir = Vector3.new(0,0,1) end
-    local tpPos   = tHRP.Position - dir * CONFIG.TPOffset
+    local dir = (tHRP.Position - myHRP.Position)
+    if dir.Magnitude > 0 then dir = dir.Unit else dir = Vector3.new(0, 0, 1) end
+    local tpPos = tHRP.Position - dir * CONFIG.TPOffset
 
     myHRP.CFrame   = CFrame.new(tpPos, tHRP.Position)
     myHRP.Velocity = Vector3.zero
@@ -3426,10 +3453,13 @@ Dropdown = CmTab:Dropdown({
     Locked = false,
     Flag   = "blink_target",
     Callback = function(selected)
+        if suppressCb then return end
+        if selected == nil then return end
         if selected == lastSelectedValue then return end
-        lastSelectedValue = selected
+        if not Characters:FindFirstChild(selected) then return end
 
-        selectedTarget = selected
+        lastSelectedValue = selected
+        selectedTarget    = selected
         print("Target:", selected)
     end,
 })
