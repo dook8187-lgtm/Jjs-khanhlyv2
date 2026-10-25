@@ -1797,7 +1797,7 @@ local StarterGui = game:GetService("StarterGui")
 local Player = Players.LocalPlayer
 
 local CONFIG = {
-    TargetPosition = Vector3.new(39.6, 154.1, 132.1),
+    TargetPosition = Vector3.new(1215.3, 228.8, 902.8),
     RespawnDelay = 1,
     TweenTime = 0.05,
     StableTime = 3,
