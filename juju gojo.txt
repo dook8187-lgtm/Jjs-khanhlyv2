@@ -157,11 +157,763 @@ InfoTab:Paragraph({
     Desc = "Basic paragraph text"
 })
    
+   local EVTab = Window:Tab({ Title = "OP strongest" })
    local Tab = Window:Tab({ Title = "OP strongest" })
    local EXPTab = Window:Tab({ Title = "EXPER" })
    local SevTab = Window:Tab({ Title = "Ultimate oli " })
    local CmTab = Window:Tab({ Title = "character skills" })
    local SttTab = Window:Tab({ Title = "Setting" })
+
+EVTab:Section({
+    Title = "Event Halloween"
+})
+
+do
+    local Players            = game:GetService("Players")
+    local PathfindingService = game:GetService("PathfindingService")
+    local RunService         = game:GetService("RunService")
+
+    local player = Players.LocalPlayer
+
+    local userEnabled = false
+
+    local CFG = {
+        FlySpeed          = 199,
+        HoverHeight       = 3.0,
+        StepMaxPerFrame   = 2.5,
+        Y_Lerp            = 6.5,
+        Y_Clamp_Up        = 3.0,
+        Y_Clamp_Down      = 2.0,
+        Y_ForceDownRate   = 20,
+        GoalTolerance     = 2,
+        WaypointSpacing   = 6,
+        AgentRadius       = 1.8,
+        AgentHeight       = 4.5,
+        AgentCanJump      = true,
+        AgentJumpHeight   = 6,
+        AgentMaxSlope     = 45,
+        StrictBlockMax    = 4,
+        LooseAllowed      = true,
+        SafeMoveMinDelta  = 0.4,
+        StuckTime         = 3.0,
+        StuckDist         = 0.5,
+        PathTimeoutMult   = 3,
+        PathTimeoutBase   = 8,
+        RepathDelay       = 0.15,
+        MaxPathRetry      = 3,
+        DoorTimeout       = 3,
+        PromptSpamRate    = 0.12,
+        DoorOpenDist      = 2,
+        StandDistFromDoor = 3,
+        PromptRangeMargin = 1.5,
+        AtDoorDist3D      = 3.5,
+        AtDoorDistXZ      = 3.5,
+        AtDoorDistY       = 3.0,
+        SettleTime        = 0.30,
+        AnchorFallback    = false,
+        HeartbeatRate     = 10,
+    }
+
+    _G.AutoDoorSetSpeed = function(v)
+        v = tonumber(v)
+        if v and v > 0 then CFG.FlySpeed = v end
+    end
+
+    local character, humanoid, hrp
+    local running         = false
+    local flightActive    = false
+    local isMoving        = false
+    local isSpamming      = false
+    local mainLoopRunning = false
+    local doorList        = {}
+    local doorListDirty   = true
+    local doorIndex       = 1
+    local forceDoorId     = nil
+    local lastEnforce     = 0
+
+    local mainLoop
+
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.IgnoreWater = true
+
+    local HAS_FIRE_PROMPT = (typeof(fireproximityprompt) == "function")
+    local HAS_HOOK        = (typeof(hookmetamethod) == "function"
+                             and typeof(getnamecallmethod) == "function")
+    local HAS_RAWMT       = (typeof(getrawmetatable) == "function"
+                             and typeof(setreadonly) == "function")
+    local hookInstalled   = false
+
+    print(("[Bypass] fire=%s hook=%s rawmt=%s"):format(
+        tostring(HAS_FIRE_PROMPT), tostring(HAS_HOOK), tostring(HAS_RAWMT)))
+
+    local function installHook()
+        if hookInstalled then return end
+        if HAS_HOOK then
+            local old
+            old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                if getnamecallmethod() == "InputHoldBegin"
+                    and typeof(self) == "Instance"
+                    and self:IsA("ProximityPrompt") then
+                    local r = old(self, ...)
+                    task.defer(function()
+                        pcall(function() if self.Parent then self:InputHoldEnd() end end)
+                    end)
+                    return r
+                end
+                return old(self, ...)
+            end))
+            hookInstalled = true
+            print("[Bypass] ✅ Hook")
+            return
+        end
+        if HAS_RAWMT then
+            local mt = getrawmetatable(game)
+            if not mt then return end
+            local old = mt.__namecall
+            setreadonly(mt, false)
+            mt.__namecall = function(self, ...)
+                if getnamecallmethod() == "InputHoldBegin"
+                    and typeof(self) == "Instance"
+                    and self:IsA("ProximityPrompt") then
+                    local r = old(self, ...)
+                    task.defer(function()
+                        pcall(function() if self.Parent then self:InputHoldEnd() end end)
+                    end)
+                    return r
+                end
+                return old(self, ...)
+            end
+            setreadonly(mt, true)
+            hookInstalled = true
+            print("[Bypass] ✅ Rawmt")
+        end
+    end
+    installHook()
+
+    local function bypassPrompt(prompt, realHold)
+        if not prompt or not prompt.Parent then return false end
+        if HAS_FIRE_PROMPT and pcall(fireproximityprompt, prompt) then return true end
+        if hookInstalled then
+            pcall(function() prompt:InputHoldBegin() end)
+            return true
+        end
+        pcall(function()
+            prompt:InputHoldBegin()
+            task.wait(math.max(realHold, 0) + 0.05)
+            prompt:InputHoldEnd()
+        end)
+        return true
+    end
+
+    local function getRoot()
+        if not character or not character.Parent then return nil end
+        if not humanoid or humanoid.Health <= 0 then return nil end
+        if not hrp or not hrp.Parent then return nil end
+        return hrp
+    end
+
+    local function activateFlight()
+        local root = getRoot(); if not root then return end
+        flightActive = true
+        root.Anchored = true; root.CanCollide = false
+        humanoid.PlatformStand = true
+        humanoid.WalkSpeed = 0; humanoid.JumpPower = 0; humanoid.JumpHeight = 0
+        humanoid.AutoRotate = false
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Physics) end)
+    end
+
+    local function disableFlight()
+        local root = getRoot(); if not root then return end
+        flightActive = false; isSpamming = true
+        humanoid.PlatformStand = false
+        humanoid.WalkSpeed = 0; humanoid.JumpPower = 50; humanoid.JumpHeight = 7.2
+        humanoid.AutoRotate = true
+        if CFG.AnchorFallback then
+            root.Anchored = true; root.CanCollide = false
+        else
+            root.Anchored = false; root.CanCollide = true
+        end
+        root.AssemblyLinearVelocity  = Vector3.zero
+        root.AssemblyAngularVelocity = Vector3.zero
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+        task.wait(CFG.SettleTime)
+    end
+
+    local function enableFlight()
+        isSpamming = false
+        activateFlight()
+    end
+
+    local function setupCharacter(char)
+        character = char
+        humanoid  = char:WaitForChild("Humanoid", 10)
+        hrp       = char:WaitForChild("HumanoidRootPart", 10)
+        if not humanoid or not hrp then return end
+        rayParams.FilterDescendantsInstances = {char}
+        task.wait(0.15)
+        if userEnabled then
+            humanoid.AutoRotate = false
+            activateFlight()
+        end
+    end
+
+    if player.Character then setupCharacter(player.Character) end
+
+    player.CharacterRemoving:Connect(function()
+        flightActive = false; isMoving = false; isSpamming = false
+    end)
+
+    player.CharacterAdded:Connect(function(char)
+        task.wait(0.5)
+        setupCharacter(char)
+        if not userEnabled then
+            pcall(function()
+                if humanoid and humanoid.Parent then
+                    humanoid.PlatformStand = false
+                    humanoid.WalkSpeed    = 16
+                    humanoid.JumpPower    = 50
+                    humanoid.JumpHeight   = 7.2
+                    humanoid.AutoRotate   = true
+                    humanoid:ChangeState(Enum.HumanoidStateType.Running)
+                end
+                if hrp and hrp.Parent then
+                    hrp.Anchored   = false
+                    hrp.CanCollide = true
+                end
+            end)
+            flightActive = false
+            running      = false
+            return
+        end
+        if not running then
+            running = true; doorIndex = 1
+            if not mainLoopRunning then task.spawn(mainLoop) end
+        end
+    end)
+
+    RunService.Heartbeat:Connect(function()
+        if not flightActive or isSpamming or isMoving then return end
+        local now = tick()
+        if now - lastEnforce < 1/CFG.HeartbeatRate then return end
+        lastEnforce = now
+        local root = getRoot(); if not root then return end
+        if not root.Anchored then root.Anchored = true end
+        if root.CanCollide then root.CanCollide = false end
+        if not humanoid.PlatformStand then humanoid.PlatformStand = true end
+        if humanoid.WalkSpeed > 0 then humanoid.WalkSpeed = 0 end
+        if humanoid.JumpPower > 0 then humanoid.JumpPower = 0 end
+    end)
+
+    local function parseId(name)
+        for _, pat in ipairs({"^%[(%d+)%]", "^%s*(%d+)%s*$", "(%d+)%s*%]$", "(%d+)$", "(%d+)"}) do
+            local n = name:match(pat); if n then return tonumber(n) end
+        end
+        return nil
+    end
+
+    local function getDoorInfo(effect)
+        local door = effect:FindFirstChild("Door"); if not door then return nil end
+        local handle = door:FindFirstChild("Handle")
+        if not (handle and handle:IsA("BasePart")) then return nil end
+        local prompt
+        local attach = handle:FindFirstChild("Attachment")
+        if attach then prompt = attach:FindFirstChildOfClass("ProximityPrompt") end
+        if not prompt then
+            for _, d in ipairs(effect:GetDescendants()) do
+                if d:IsA("ProximityPrompt") then prompt = d; break end
+            end
+        end
+        if not prompt then return nil end
+        return { effect=effect, door=door, handle=handle, prompt=prompt,
+                 id=parseId(effect.Name), name=effect.Name }
+    end
+
+    local function rebuildDoorList()
+        local folder = workspace:FindFirstChild("Effects")
+        table.clear(doorList)
+        if folder then
+            for _, e in ipairs(folder:GetChildren()) do
+                local i = getDoorInfo(e); if i then table.insert(doorList, i) end
+            end
+        end
+        table.sort(doorList, function(a, b)
+            if a.id and b.id then return a.id < b.id end
+            if a.id then return true end
+            if b.id then return false end
+            return a.name < b.name
+        end)
+        doorListDirty = false
+        print(("[Auto] %d cửa"):format(#doorList))
+    end
+
+    task.spawn(function()
+        local folder = workspace:WaitForChild("Effects", 30)
+        if not folder then warn("[Auto] Không có Workspace.Effects"); return end
+        folder.ChildAdded:Connect(function() doorListDirty = true end)
+        folder.ChildRemoved:Connect(function() doorListDirty = true end)
+    end)
+
+    local function doorExists(info)
+        return info.effect.Parent ~= nil and info.door.Parent ~= nil and info.handle.Parent ~= nil
+    end
+    local function doorPos(info)
+        if not info.handle.Parent then return nil end
+        return info.handle.Position
+    end
+    local function getPromptWorldPos(prompt)
+        local p = prompt.Parent; if not p then return nil end
+        if p:IsA("Attachment") then return p.WorldPosition end
+        if p:IsA("BasePart") then return p.Position end
+        return nil
+    end
+
+    local function safeMove(fromPos, toPos)
+        local delta = toPos - fromPos
+        local dist = delta.Magnitude
+        if dist < CFG.SafeMoveMinDelta then return toPos, false end
+        local dir = delta.Unit
+        local hit1 = workspace:Raycast(fromPos, delta, rayParams)
+        if hit1 then
+            local safeDist = math.max(0, (hit1.Position - fromPos).Magnitude - 0.4)
+            if safeDist < 0.1 then return fromPos, true end
+            return fromPos + dir * safeDist, true
+        end
+        local hit2 = workspace:Raycast(fromPos + Vector3.new(0, 2.5, 0), delta, rayParams)
+        if hit2 then
+            local safeDist = math.max(0, (hit2.Position - fromPos).Magnitude - 0.4)
+            if safeDist < 0.1 then return fromPos, true end
+            return fromPos + dir * safeDist, true
+        end
+        return toPos, false
+    end
+
+    local function faceDirection(root, dir)
+        local flat = Vector3.new(dir.X, 0, dir.Z)
+        if flat.Magnitude < 0.05 then return end
+        local p = root.Position
+        root.CFrame = CFrame.lookAt(p, p + flat.Unit)
+    end
+
+    local function moveToTarget(targetPos, maxTimeMult)
+        local root = getRoot(); if not root then return false end
+        if not userEnabled or not running then return false end
+        if not flightActive then activateFlight() end
+
+        maxTimeMult = maxTimeMult or CFG.PathTimeoutMult
+        local startPos = root.Position
+        local startDist = (startPos - targetPos).Magnitude
+        if startDist < CFG.GoalTolerance then return true end
+
+        isMoving = true
+        local startT = os.clock()
+        local maxTime = (startDist / math.max(CFG.FlySpeed,1)) * maxTimeMult + CFG.PathTimeoutBase
+        local stuckT = os.clock()
+        local stuckPos = startPos
+        local success = false
+        local blockedCount = 0
+        local looseMode = false
+
+        while running and userEnabled and getRoot() do
+            local pos = root.Position
+
+            if os.clock() - startT > maxTime then
+                warn("[Auto] moveToTarget timeout"); break
+            end
+            if (pos - stuckPos).Magnitude > CFG.StuckDist then
+                stuckT = os.clock(); stuckPos = pos
+            elseif os.clock() - stuckT > CFG.StuckTime then
+                warn("[Auto] moveToTarget stuck"); break
+            end
+
+            local delta = targetPos - pos
+            local flatVec = Vector3.new(delta.X, 0, delta.Z)
+            local flatDist = flatVec.Magnitude
+            if flatDist < CFG.GoalTolerance and math.abs(delta.Y) < CFG.HoverHeight + 2 then
+                success = true; break
+            end
+
+            task.wait()
+            local dt = 1/60
+            local moveDir = flatDist > 0.1 and flatVec.Unit or Vector3.zero
+
+            local rawTargetY = targetPos.Y + CFG.HoverHeight
+            local yMax = targetPos.Y + CFG.HoverHeight + CFG.Y_Clamp_Up
+            local yMin = targetPos.Y - CFG.Y_Clamp_Down
+            local targetY = math.min(rawTargetY, yMax)
+            targetY = math.max(targetY, yMin)
+
+            local newY
+            if pos.Y > yMax then
+                newY = math.max(yMax, pos.Y - CFG.Y_ForceDownRate * dt)
+            elseif pos.Y < yMin then
+                newY = math.min(yMin, pos.Y + CFG.Y_ForceDownRate * dt)
+            else
+                newY = pos.Y + (targetY - pos.Y) * math.min(1, dt * CFG.Y_Lerp)
+            end
+
+            local step = math.min(CFG.FlySpeed * dt, CFG.StepMaxPerFrame, flatDist)
+            local plannedPos = Vector3.new(pos.X + moveDir.X * step, newY, pos.Z + moveDir.Z * step)
+
+            local actualPos
+            if looseMode then
+                actualPos = plannedPos
+            else
+                local sp, blocked = safeMove(pos, plannedPos)
+                actualPos = sp
+                if blocked then
+                    blockedCount += 1
+                    if blockedCount >= CFG.StrictBlockMax and CFG.LooseAllowed then
+                        looseMode = true; blockedCount = 0
+                        warn("[Auto] → loose mode (cho phép xuyên)")
+                    end
+                else blockedCount = 0 end
+            end
+
+            if actualPos.Y > yMax then actualPos = Vector3.new(actualPos.X, yMax, actualPos.Z)
+            elseif actualPos.Y < yMin then actualPos = Vector3.new(actualPos.X, yMin, actualPos.Z) end
+
+            root.CFrame = CFrame.new(actualPos) * (root.CFrame - root.CFrame.Position)
+            if moveDir.Magnitude > 0.05 then faceDirection(root, moveDir) end
+        end
+
+        isMoving = false
+        local finalRoot = getRoot()
+        if finalRoot and (finalRoot.Position - targetPos).Magnitude < 5 then return true end
+        return success
+    end
+
+    local function flyAlongPath(waypoints, speed)
+        local root = getRoot()
+        if not root or not waypoints or #waypoints == 0 then return true end
+        if not userEnabled or not running then return false end
+        if not flightActive then activateFlight() end
+
+        local points = {}
+        local prev = root.Position
+        for _, wp in ipairs(waypoints) do
+            local p = Vector3.new(wp.Position.X, wp.Position.Y + CFG.HoverHeight, wp.Position.Z)
+            if (p - prev).Magnitude < 300 then
+                if #points == 0 or (p - points[#points]).Magnitude > 1 then
+                    table.insert(points, p)
+                end
+            end
+            prev = wp.Position
+        end
+        if #points == 0 then return true end
+
+        for i = 1, #points do
+            if not running or not userEnabled or not getRoot() then return false end
+            local ok = moveToTarget(points[i], CFG.PathTimeoutMult)
+            if not ok then
+                if i == #points then
+                    warn(("[Auto] Waypoint cuối %d/%d fail → loose"):format(i, #points))
+                    return true
+                else
+                    warn(("[Auto] Skip waypoint %d/%d"):format(i, #points))
+                end
+            end
+        end
+        return true
+    end
+
+    local function pathTo(targetPos)
+        local root = getRoot(); if not root then return false end
+        if not userEnabled or not running then return false end
+
+        local directDist = (root.Position - targetPos).Magnitude
+        if directDist <= CFG.GoalTolerance then return true end
+        if directDist < 6 then
+            if moveToTarget(targetPos, 1.5) then return true end
+        end
+
+        for attempt = 1, CFG.MaxPathRetry do
+            if not userEnabled or not running then return false end
+            root = getRoot(); if not root then return false end
+
+            local path = PathfindingService:CreatePath({
+                AgentRadius     = CFG.AgentRadius,
+                AgentHeight     = CFG.AgentHeight,
+                AgentCanJump    = CFG.AgentCanJump,
+                AgentJumpHeight = CFG.AgentJumpHeight,
+                AgentMaxSlope   = CFG.AgentMaxSlope,
+                WaypointSpacing = CFG.WaypointSpacing,
+            })
+
+            local computed = pcall(function()
+                path:ComputeAsync(root.Position, targetPos)
+            end)
+
+            if computed and path.Status == Enum.PathStatus.Success then
+                local waypoints = path:GetWaypoints()
+                if #waypoints > 0 then
+                    flyAlongPath(waypoints, CFG.FlySpeed)
+                    root = getRoot()
+                    if root and (root.Position - targetPos).Magnitude <= CFG.GoalTolerance + 3 then
+                        return true
+                    end
+                end
+            end
+
+            if attempt < CFG.MaxPathRetry then task.wait(CFG.RepathDelay) end
+        end
+
+        warn("[Auto] Pathfinding fail → direct loose fallback")
+        return moveToTarget(targetPos, CFG.PathTimeoutMult * 2)
+    end
+
+    local function approachDoor(info)
+        local root = getRoot()
+        local prompt = info.prompt
+        if not root or not prompt then return false end
+        local promptPos = getPromptWorldPos(prompt)
+        local dest = doorPos(info)
+        if not promptPos or not dest then return false end
+
+        local dir = root.Position - promptPos
+        dir = Vector3.new(dir.X, 0, dir.Z)
+        if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
+        dir = dir.Unit
+
+        local realMax = prompt.MaxActivationDistance or 10
+        local safeDist = math.max(1, math.min(CFG.StandDistFromDoor, realMax - CFG.PromptRangeMargin))
+        local standPos = Vector3.new(
+            promptPos.X + dir.X * safeDist,
+            dest.Y,
+            promptPos.Z + dir.Z * safeDist
+        )
+        if pathTo(standPos) then return true end
+        return pathTo(dest)
+    end
+
+    local function tryOpenDoor(info)
+        local prompt = info.prompt
+        local root   = getRoot()
+        if not prompt or not prompt.Parent or not root then return false end
+        if not userEnabled or not running then return false end
+
+        local realHold = prompt.HoldDuration or 0
+        local realMax  = prompt.MaxActivationDistance or 10
+        pcall(function() prompt.Enabled = true end)
+
+        local promptPos = getPromptWorldPos(prompt)
+        if not promptPos then return false end
+        local initPos = doorPos(info); if not initPos then return true end
+
+        local curRoot = getRoot(); if not curRoot then return false end
+        local pos3D = curRoot.Position
+        local d3D = (pos3D - promptPos).Magnitude
+
+        if d3D > CFG.AtDoorDist3D + 2 then
+            print(("[Auto] ⚠ Chưa đúng cửa 3D=%.1f → di chuyển thêm"):format(d3D))
+            local dir = pos3D - promptPos
+            dir = Vector3.new(dir.X, 0, dir.Z)
+            if dir.Magnitude < 0.1 then dir = Vector3.new(0,0,1) end
+            dir = dir.Unit
+            local closer = Vector3.new(
+                promptPos.X + dir.X * math.min(2, realMax - 1),
+                promptPos.Y,
+                promptPos.Z + dir.Z * math.min(2, realMax - 1)
+            )
+            if not pathTo(closer) then
+                warn("[Auto] Không vào được cửa, bỏ qua")
+                return false
+            end
+            task.wait(0.1)
+        end
+
+        if not userEnabled or not running then return false end
+        print("[Auto] stop on")
+        disableFlight()
+
+        local t0 = os.clock()
+        local attempts = 0
+        local opened = false
+
+        while os.clock() - t0 < CFG.DoorTimeout do
+            if not userEnabled or not running then break end
+            if not doorExists(info) then opened = true; break end
+            local p = doorPos(info)
+            if not p or (p - initPos).Magnitude > CFG.DoorOpenDist then opened = true; break end
+            local r2 = getRoot(); if not r2 then break end
+            r2.AssemblyLinearVelocity  = Vector3.zero
+            r2.AssemblyAngularVelocity = Vector3.zero
+            bypassPrompt(prompt, realHold)
+            attempts += 1
+            local p2 = doorPos(info)
+            if not p2 or (p2 - initPos).Magnitude > CFG.DoorOpenDist then opened = true; break end
+            task.wait(CFG.PromptSpamRate)
+        end
+
+        if userEnabled and running then
+            print("[Auto] start")
+            enableFlight()
+            task.wait(0.15)
+        end
+
+        if opened then
+            print(("[Auto] Mở sau %d lần (%.2fs)"):format(attempts, os.clock() - t0))
+        else
+            print(("[Auto] 3s fail (%d lần) → next cửa"):format(attempts))
+        end
+        return opened
+    end
+
+    _G.AutoDoorGoToDoor = function(id)
+        id = tonumber(id); if not id then return end
+        forceDoorId = id
+    end
+
+    _G.AutoDoorDebug = function()
+        if doorListDirty then rebuildDoorList() end
+        print(("[Auto] %d cửa:"):format(#doorList))
+        for i, d in ipairs(doorList) do
+            print(("  [%d] %s | ID=%s | Hold=%.2f | MaxDist=%d"):format(
+                i, d.name, tostring(d.id),
+                d.prompt.HoldDuration or 0,
+                d.prompt.MaxActivationDistance or 10))
+        end
+    end
+
+    mainLoop = function()
+        if mainLoopRunning then return end
+        mainLoopRunning = true
+        print("[Auto] ▶ Start v13 Khanhlyhub beta")
+
+        local consecutiveFails = 0
+
+        while running and userEnabled do
+            if not getRoot() then task.wait(1); continue end
+            if doorListDirty then rebuildDoorList() end
+            if #doorList == 0 then task.wait(1); continue end
+
+            if forceDoorId then
+                local found = nil
+                for i, d in ipairs(doorList) do
+                    if d.id == forceDoorId then found = i; break end
+                end
+                if found then doorIndex = found; forceDoorId = nil
+                else warn(("[Auto] Không có ID=%d"):format(forceDoorId)); forceDoorId = nil end
+            end
+
+            if doorIndex > #doorList then
+                doorIndex = 1
+                print("[Auto] ↻ Restart")
+            end
+
+            local info = doorList[doorIndex]
+            if not doorExists(info) then doorIndex += 1; continue end
+
+            print(("[Auto] → #%d (%s, ID=%s)"):format(doorIndex, info.name, tostring(info.id)))
+            local tStart = os.clock()
+            local opened = false
+
+            pcall(function()
+                if approachDoor(info) and doorExists(info) then
+                    opened = tryOpenDoor(info)
+                end
+            end)
+
+            if not userEnabled or not running then break end
+
+            if opened then
+                print(("[Auto] #%d (%.1fs)"):format(doorIndex, os.clock() - tStart))
+                doorListDirty = true
+                consecutiveFails = 0
+            else
+                consecutiveFails += 1
+                print(("[Auto] #%d fail (%.1fs, %d liên tiếp)"):format(
+                    doorIndex, os.clock() - tStart, consecutiveFails))
+                if consecutiveFails >= #doorList then
+                    warn("[Auto] Fail toàn bộ, nghỉ 3s rồi restart")
+                    task.wait(3); consecutiveFails = 0
+                end
+            end
+
+            doorIndex += 1
+            task.wait(CFG.RepathDelay)
+        end
+
+        mainLoopRunning = false
+        print("[Auto] ■ Stop")
+    end
+
+    if not player.Character then player.CharacterAdded:Wait(); task.wait(0.5) end
+    setupCharacter(player.Character)
+
+    if humanoid then
+        humanoid.Died:Connect(function()
+            print("[Auto] Player chết")
+            running = false; flightActive = false; isMoving = false; isSpamming = false
+        end)
+    end
+
+    local toggling = false
+
+    local function turnOn()
+        if toggling then return end
+        toggling = true
+        userEnabled = true
+        running     = true
+        isSpamming  = false
+        isMoving    = false
+        doorIndex   = 1
+        doorListDirty = true
+
+        if humanoid and humanoid.Parent and hrp and hrp.Parent then
+            humanoid.AutoRotate = false
+            pcall(activateFlight)
+        end
+        if not mainLoopRunning then task.spawn(mainLoop) end
+
+        print("[Toggle] ON")
+        toggling = false
+    end
+
+    local function turnOff()
+        if toggling then return end
+        toggling = true
+        userEnabled = false
+        running     = false
+
+        local t0 = os.clock()
+        while mainLoopRunning and os.clock() - t0 < 5 do
+            task.wait(0.05)
+        end
+        mainLoopRunning = false
+        isMoving        = false
+
+        if humanoid and humanoid.Parent then
+            humanoid.PlatformStand = false
+            humanoid.WalkSpeed    = 16
+            humanoid.JumpPower    = 50
+            humanoid.JumpHeight   = 7.2
+            humanoid.AutoRotate   = true
+            pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Running) end)
+        end
+        if hrp and hrp.Parent then
+            hrp.Anchored   = false
+            hrp.CanCollide = true
+            hrp.AssemblyLinearVelocity  = Vector3.zero
+            hrp.AssemblyAngularVelocity = Vector3.zero
+        end
+        flightActive = false
+        isSpamming   = false
+
+        print("[Toggle] OFF")
+        toggling = false
+    end
+
+    EVTab:Toggle({
+        Title    = "auto farm door event",
+        Default  = false,
+        Callback = function(state)
+            task.spawn(function()
+                if state then turnOn() else turnOff() end
+            end)
+        end,
+    })
+end
 
 Tab:Section({
     Title = "AIM new"
